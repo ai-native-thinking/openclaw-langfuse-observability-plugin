@@ -13,11 +13,11 @@ It uses OpenClaw's typed lifecycle hooks (`llm_input`, `llm_output`, `before_too
 ## Build and install locally
 
 ```bash
-cd /Users/xuwei/workspace/plugins/openclaw-langfuse-observability-plugin
+cd /path/to/openclaw-langfuse-observability-plugin
 pnpm install
 pnpm check
 openclaw plugins install --link \
-  /Users/xuwei/workspace/plugins/openclaw-langfuse-observability-plugin
+  /path/to/openclaw-langfuse-observability-plugin
 openclaw plugins enable openclaw-langfuse-observability-plugin
 ```
 
