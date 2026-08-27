@@ -1,0 +1,52 @@
+{
+  "name": "openclaw-langfuse-observability-plugin",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin that traces agent runs, model calls, tools, and subagents to Langfuse",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.mjs"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "langfuse",
+    "observability",
+    "opentelemetry",
+    "tracing"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "dependencies": {
+    "@langfuse/otel": "^5.9.0",
+    "@langfuse/tracing": "^5.9.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsdown": "^0.18.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.0.0"
+  },
+  "packageManager": "pnpm@11.19.0"
+}

@@ -1,0 +1,76 @@
+{
+  "id": "openclaw-langfuse-observability-plugin",
+  "name": "Langfuse Observability",
+  "description": "Trace OpenClaw agent runs, model calls, tools, and subagents to Langfuse.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable Langfuse tracing. LANGFUSE_OPENCLAW_ENABLED takes precedence."
+      },
+      "publicKey": {
+        "type": "string",
+        "description": "Langfuse public key. Falls back to LANGFUSE_PUBLIC_KEY."
+      },
+      "secretKey": {
+        "type": "string",
+        "description": "Langfuse secret key. Falls back to LANGFUSE_SECRET_KEY."
+      },
+      "baseUrl": {
+        "type": "string",
+        "default": "https://cloud.langfuse.com",
+        "description": "Langfuse host. Falls back to LANGFUSE_BASE_URL."
+      },
+      "environment": {
+        "type": "string",
+        "description": "Langfuse environment name."
+      },
+      "userId": {
+        "type": "string",
+        "description": "Optional Langfuse trace user id."
+      },
+      "tags": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Tags attached to every trace."
+      },
+      "metadata": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Metadata attached to every trace."
+      },
+      "captureInput": {
+        "type": "boolean",
+        "default": true,
+        "description": "Capture prompts, history, and tool parameters."
+      },
+      "captureOutput": {
+        "type": "boolean",
+        "default": true,
+        "description": "Capture model responses and tool results."
+      },
+      "redactSensitiveData": {
+        "type": "boolean",
+        "default": true,
+        "description": "Redact values whose field names look like credentials."
+      },
+      "maxChars": {
+        "type": "integer",
+        "minimum": 100,
+        "default": 20000,
+        "description": "Maximum characters retained for each captured string."
+      },
+      "debug": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable verbose plugin logging."
+      }
+    }
+  }
+}
