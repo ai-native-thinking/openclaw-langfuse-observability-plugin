@@ -58,6 +58,8 @@ type RunState = {
   generation: Observation;
   generationEnded: boolean;
   rootIsTrace: boolean;
+  traceAttributes: TraceAttributes;
+  pendingCompletion?: RunCompletion;
   input?: unknown;
   output?: unknown;
   tools: Map<string, ToolState>;
@@ -71,11 +73,20 @@ type SubagentParent = {
   label?: string;
 };
 
+type TraceAttributes = Record<string, string | string[]>;
+
+type RunCompletion = {
+  success: boolean;
+  error?: string;
+  durationMs?: number;
+};
+
 const TRACE_NAME_KEY = "langfuse.trace.name";
 const TRACE_USER_ID_KEY = "langfuse.user.id";
 const TRACE_SESSION_ID_KEY = "langfuse.session.id";
 const TRACE_TAGS = "langfuse.trace.tags";
 const TRACE_NAME_VALUE = "OpenClaw Agent Run";
+const LLM_OUTPUT_GRACE_MS = 1_000;
 
 function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
@@ -110,12 +121,7 @@ export class TraceEngine {
   private readonly runIdsBySessionId = new Map<string, string>();
   private readonly runIdsBySessionKey = new Map<string, string>();
   private readonly subagentParents = new Map<string, SubagentParent>();
-  // Buffer of recently finished runs so a trailing llm_output (which carries the
-  // final usage) can still attach its data even when agent_end arrived first and
-  // already deleted the run from the active map. Langfuse permits updating an
-  // observation after it has ended.
-  private readonly finishedRuns = new Map<string, { run: RunState; expires: number }>();
-  private readonly finishedRunsTtlMs = 5_000;
+  private readonly finishTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly tracing: Tracing,
@@ -144,9 +150,9 @@ export class TraceEngine {
     const parent = subagent?.requesterSessionKey
       ? this.findRunBySessionKey(subagent.requesterSessionKey)
       : undefined;
+    const traceAttributes = parent?.traceAttributes ?? this.traceLevelAttributes(event, ctx);
     const rootAttributes = compact({
       input,
-      ...this.traceLevelAttributes(event, ctx),
       metadata: compact({
         "openclaw.run_id": event.runId,
         "openclaw.session_id": event.sessionId,
@@ -165,13 +171,12 @@ export class TraceEngine {
       ? parent.root.startObservation("OpenClaw Subagent Run", rootAttributes, { asType: "agent" })
       : this.tracing.startObservation("OpenClaw Agent Run", rootAttributes, { asType: "agent" });
     const rootIsTrace = !parent;
-    if (rootIsTrace) this.setTraceAttributes(root, event, ctx);
+    this.applyTraceAttributes(root, traceAttributes);
 
     const generation = root.startObservation(
       event.model || "LLM",
       compact({
         input,
-        ...this.traceLevelAttributes(event, ctx),
         model: event.model,
         metadata: {
           "openclaw.provider": event.provider,
@@ -180,6 +185,7 @@ export class TraceEngine {
       }),
       { asType: "generation" },
     );
+    this.applyTraceAttributes(generation, traceAttributes);
     const run: RunState = {
       runId: event.runId,
       sessionId: event.sessionId,
@@ -188,6 +194,7 @@ export class TraceEngine {
       generation,
       generationEnded: false,
       rootIsTrace,
+      traceAttributes,
       input,
       tools: new Map(),
       toolOrder: [],
@@ -201,15 +208,7 @@ export class TraceEngine {
   }
 
   onLlmOutput(event: LlmOutputEvent): void {
-    let run = this.runs.get(event.runId);
-    if (!run) {
-      const finished = this.finishedRuns.get(event.runId);
-      if (finished && finished.expires > this.now()) {
-        run = finished.run;
-      } else if (finished) {
-        this.finishedRuns.delete(event.runId);
-      }
-    }
+    const run = this.runs.get(event.runId);
     if (!run) return;
     run.touchedAt = this.now();
     const output = this.config.captureOutput
@@ -224,6 +223,11 @@ export class TraceEngine {
       run.generation.end();
       run.generationEnded = true;
     }
+    if (run.pendingCompletion) {
+      const completion = run.pendingCompletion;
+      run.pendingCompletion = undefined;
+      this.finishRun(run, completion.success, completion.error, completion.durationMs);
+    }
   }
 
   onBeforeToolCall(event: BeforeToolCallEvent, ctx: ToolContext): void {
@@ -235,7 +239,6 @@ export class TraceEngine {
     const observation = parent.startObservation(
       event.toolName || "tool",
       compact({
-        ...this.traceLevelAttributesById(run.sessionId),
         input: this.config.captureInput
           ? sanitizeValue(event.params, this.config)
           : undefined,
@@ -246,6 +249,7 @@ export class TraceEngine {
       }),
       { asType: "tool" },
     );
+    this.applyTraceAttributes(observation, run.traceAttributes);
     const tool: ToolState = {
       key,
       name: event.toolName,
@@ -273,7 +277,6 @@ export class TraceEngine {
         observation: parent.startObservation(
           event.toolName || "tool",
           compact({
-            ...this.traceLevelAttributesById(run.sessionId),
             input: this.config.captureInput
               ? sanitizeValue(event.params, this.config)
               : undefined,
@@ -284,6 +287,7 @@ export class TraceEngine {
       };
       run.tools.set(tool.key, tool);
       run.toolOrder.push(tool);
+      this.applyTraceAttributes(tool.observation, run.traceAttributes);
     }
     tool.observation.update(
       compact({
@@ -309,7 +313,7 @@ export class TraceEngine {
     if (run.output === undefined && this.config.captureOutput) {
       run.output = sanitizeValue(extractLastAssistantText(event.messages), this.config);
     }
-    this.finishRun(run, event.success, event.error, event.durationMs);
+    this.finishAfterOutput(run, event.success, event.error, event.durationMs);
   }
 
   onSubagentSpawned(event: SubagentSpawnedEvent, ctx: SubagentContext): void {
@@ -322,7 +326,7 @@ export class TraceEngine {
   onSubagentEnded(event: SubagentEndedEvent): void {
     const run = event.runId ? this.runs.get(event.runId) : undefined;
     if (run) {
-      this.finishRun(
+      this.finishAfterOutput(
         run,
         event.outcome === undefined || event.outcome === "ok",
         event.error ?? (event.outcome && event.outcome !== "ok" ? event.outcome : undefined),
@@ -335,9 +339,6 @@ export class TraceEngine {
     const cutoff = this.now() - maxIdleMs;
     for (const run of [...this.runs.values()]) {
       if (run.touchedAt < cutoff) this.finishRun(run, false, "Observation timed out");
-    }
-    for (const [runId, finished] of [...this.finishedRuns.entries()]) {
-      if (finished.expires <= this.now()) this.finishedRuns.delete(runId);
     }
   }
 
@@ -377,6 +378,9 @@ export class TraceEngine {
     error?: string,
     durationMs?: number,
   ): void {
+    if (this.runs.get(run.runId) !== run) return;
+    this.clearFinishTimer(run.runId);
+    run.pendingCompletion = undefined;
     for (const tool of run.toolOrder) {
       if (!tool.ended) {
         tool.observation.update({
@@ -418,46 +422,64 @@ export class TraceEngine {
     if (run.sessionKey && this.runIdsBySessionKey.get(run.sessionKey) === run.runId) {
       this.runIdsBySessionKey.delete(run.sessionKey);
     }
-    // Keep a short-lived copy so a trailing llm_output can still attach usage
-    // even if agent_end finished this run first.
-    this.finishedRuns.set(run.runId, { run, expires: this.now() + this.finishedRunsTtlMs });
     this.debug(`finished run ${run.runId}`);
   }
 
-  // Trace-level attributes (session, user, tags) that Langfuse reads to group
-  // and label a trace. These MUST be present on every span we emit, not just the
-  // root: the OpenClaw Agent Run root span is the LAST span we end, so the
-  // BatchSpanProcessor often exports a child (generation/tool) span first. If a
-  // child bootstraps the Langfuse trace, the trace-level session is taken from
-  // that child and the session.id only arriving later on the root is not
-  // applied retroactively — which is exactly why only the first trace of a
-  // session would show a session id while later ones did not.
-  private traceLevelAttributes(event: LlmInputEvent, ctx: AgentContext): Record<string, unknown> {
-    return compact({
-      [TRACE_SESSION_ID_KEY]: event.sessionId || ctx.sessionKey || event.runId,
-      [TRACE_USER_ID_KEY]: this.config.userId,
-      [TRACE_NAME_KEY]: TRACE_NAME_VALUE,
-      [TRACE_TAGS]: this.config.tags?.length ? this.config.tags : undefined,
-    });
-  }
-
-  private traceLevelAttributesById(sessionId: string): Record<string, unknown> {
-    return compact({
-      [TRACE_SESSION_ID_KEY]: sessionId,
-      [TRACE_NAME_KEY]: TRACE_NAME_VALUE,
-    });
-  }
-
-  private setTraceAttributes(
-    root: Observation,
-    event: LlmInputEvent,
-    ctx: AgentContext,
+  private finishAfterOutput(
+    run: RunState,
+    success: boolean,
+    error?: string,
+    durationMs?: number,
   ): void {
-    const span = root.otelSpan;
+    if (run.generationEnded) {
+      this.finishRun(run, success, error, durationMs);
+      return;
+    }
+
+    // OpenClaw dispatches completion hooks and llm_output concurrently. A
+    // completion hook can arrive first by a few milliseconds. Keep spans open
+    // briefly so llm_output can attach final output and token usage before they
+    // are ended. The timer is a fail-safe for runs that never emit output.
+    run.pendingCompletion = { success, error, durationMs };
+    this.scheduleFinish(run);
+  }
+
+  private scheduleFinish(run: RunState): void {
+    this.clearFinishTimer(run.runId);
+    const timer = setTimeout(() => {
+      this.finishTimers.delete(run.runId);
+      const completion = run.pendingCompletion;
+      if (completion) {
+        this.finishRun(run, completion.success, completion.error, completion.durationMs);
+      }
+    }, LLM_OUTPUT_GRACE_MS);
+    timer.unref?.();
+    this.finishTimers.set(run.runId, timer);
+  }
+
+  private clearFinishTimer(runId: string): void {
+    const timer = this.finishTimers.get(runId);
+    if (timer) clearTimeout(timer);
+    this.finishTimers.delete(runId);
+  }
+
+  // Trace-level attributes must be written directly to every OTel span.
+  // startObservation only accepts Langfuse observation fields and discards
+  // unknown top-level properties such as langfuse.session.id.
+  private traceLevelAttributes(event: LlmInputEvent, ctx: AgentContext): TraceAttributes {
+    const attributes: TraceAttributes = {
+      [TRACE_SESSION_ID_KEY]: event.sessionId || ctx.sessionKey || event.runId,
+      [TRACE_NAME_KEY]: TRACE_NAME_VALUE,
+    };
+    if (this.config.userId) attributes[TRACE_USER_ID_KEY] = this.config.userId;
+    if (this.config.tags?.length) attributes[TRACE_TAGS] = this.config.tags;
+    return attributes;
+  }
+
+  private applyTraceAttributes(observation: Observation, attributes: TraceAttributes): void {
+    const span = observation.otelSpan;
     if (!span) return;
-    span.setAttribute(TRACE_NAME_KEY, TRACE_NAME_VALUE);
-    const attrs = this.traceLevelAttributes(event, ctx);
-    for (const [key, value] of Object.entries(attrs)) span.setAttribute(key, value);
+    for (const [key, value] of Object.entries(attributes)) span.setAttribute(key, value);
   }
 
   private debug(message: string): void {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { LangfusePluginConfig } from "../src/config.js";
 import { TraceEngine, type Observation, type Tracing } from "../src/trace-engine.js";
@@ -31,7 +31,7 @@ function createRecorder() {
       children: [],
       spanAttributes: {},
       update(update) {
-        observation.updates.push(update);
+        if (!observation.ended) observation.updates.push(update);
         return observation;
       },
       end() {
@@ -47,7 +47,7 @@ function createRecorder() {
       },
       otelSpan: {
         setAttribute(key, value) {
-          observation.spanAttributes[key] = value;
+          if (!observation.ended) observation.spanAttributes[key] = value;
         },
       },
     };
@@ -136,13 +136,16 @@ describe("TraceEngine", () => {
     const root = roots[0]!;
     expect(root.name).toBe("OpenClaw Agent Run");
     expect(root.ended).toBe(true);
-    expect(root.spanAttributes["session.id"]).toBe("session-1");
-    expect(root.spanAttributes["user.id"]).toBe("user-1");
+    expect(root.spanAttributes["langfuse.session.id"]).toBe("session-1");
+    expect(root.spanAttributes["langfuse.user.id"]).toBe("user-1");
+    expect(root.spanAttributes["langfuse.trace.name"]).toBe("OpenClaw Agent Run");
+    expect(root.spanAttributes["langfuse.trace.tags"]).toEqual(["openclaw"]);
     expect(root.traceIO?.output).toBe("done");
 
     const generation = root.children[0]!;
     expect(generation.type).toBe("generation");
     expect(generation.ended).toBe(true);
+    expect(generation.spanAttributes).toMatchObject(root.spanAttributes);
     expect(generation.updates[0]).toMatchObject({
       output: "done",
       usageDetails: { input: 10, output: 5, cache_read: 3, total: 15 },
@@ -151,8 +154,177 @@ describe("TraceEngine", () => {
     const tool = generation.children[0]!;
     expect(tool.type).toBe("tool");
     expect(tool.ended).toBe(true);
+    expect(tool.spanAttributes).toMatchObject(root.spanAttributes);
     expect(tool.attributes.input).toEqual({ query: "Langfuse", apiKey: "[REDACTED]" });
     expect(tool.updates[0]).toMatchObject({ output: { count: 2 } });
+  });
+
+  it("waits for a trailing llm_output before ending spans", () => {
+    const { tracing, roots } = createRecorder();
+    const engine = new TraceEngine(tracing, config, {});
+    const agentContext = { sessionId: "session-late", sessionKey: "agent:main:late" };
+
+    engine.onLlmInput(
+      {
+        runId: "run-late",
+        sessionId: "session-late",
+        provider: "openai",
+        model: "gpt-5",
+        prompt: "hello",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+      agentContext,
+    );
+    engine.onAgentEnd(
+      { messages: [{ role: "assistant", content: "done" }], success: true, durationMs: 100 },
+      agentContext,
+    );
+
+    const root = roots[0]!;
+    const generation = root.children[0]!;
+    expect(engine.activeRunCount()).toBe(1);
+    expect(root.ended).toBe(false);
+    expect(generation.ended).toBe(false);
+
+    engine.onLlmOutput({
+      runId: "run-late",
+      sessionId: "session-late",
+      provider: "openai",
+      model: "gpt-5",
+      assistantTexts: ["done"],
+      usage: { input: 20, output: 7, total: 27 },
+    });
+
+    expect(engine.activeRunCount()).toBe(0);
+    expect(root.ended).toBe(true);
+    expect(generation.ended).toBe(true);
+    expect(generation.updates.at(-1)).toMatchObject({
+      output: "done",
+      usageDetails: { input: 20, output: 7, total: 27 },
+    });
+  });
+
+  it("finishes after a grace period when llm_output never arrives", () => {
+    vi.useFakeTimers();
+    try {
+      const { tracing, roots } = createRecorder();
+      const engine = new TraceEngine(tracing, config, {});
+      const agentContext = { sessionId: "session-timeout", sessionKey: "agent:main:timeout" };
+
+      engine.onLlmInput(
+        {
+          runId: "run-timeout",
+          sessionId: "session-timeout",
+          provider: "openai",
+          model: "gpt-5",
+          prompt: "hello",
+          historyMessages: [],
+          imagesCount: 0,
+        },
+        agentContext,
+      );
+      engine.onAgentEnd(
+        { messages: [{ role: "assistant", content: "done" }], success: true },
+        agentContext,
+      );
+
+      expect(engine.activeRunCount()).toBe(1);
+      vi.advanceTimersByTime(1_000);
+      expect(engine.activeRunCount()).toBe(0);
+      expect(roots[0]?.ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for llm_output when subagent_ended arrives first", () => {
+    const { tracing, roots } = createRecorder();
+    const engine = new TraceEngine(tracing, config, {});
+
+    engine.onLlmInput(
+      {
+        runId: "subagent-run",
+        sessionId: "subagent-session",
+        provider: "openai",
+        model: "gpt-5-mini",
+        prompt: "child",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+      { sessionId: "subagent-session", sessionKey: "agent:child:standalone" },
+    );
+    engine.onSubagentEnded({
+      targetSessionKey: "agent:child:standalone",
+      targetKind: "subagent",
+      reason: "completed",
+      runId: "subagent-run",
+      outcome: "ok",
+    });
+
+    expect(engine.activeRunCount()).toBe(1);
+    engine.onLlmOutput({
+      runId: "subagent-run",
+      sessionId: "subagent-session",
+      provider: "openai",
+      model: "gpt-5-mini",
+      assistantTexts: ["child done"],
+      usage: { input: 8, output: 3, total: 11 },
+    });
+
+    expect(engine.activeRunCount()).toBe(0);
+    expect(roots[0]?.children[0]?.updates.at(-1)).toMatchObject({
+      usageDetails: { input: 8, output: 3, total: 11 },
+    });
+  });
+
+  it("keeps parent trace attributes on nested subagent spans", () => {
+    const { tracing, roots } = createRecorder();
+    const engine = new TraceEngine(tracing, config, {});
+    const parentContext = { sessionId: "parent-session", sessionKey: "agent:main" };
+
+    engine.onLlmInput(
+      {
+        runId: "parent-run",
+        sessionId: "parent-session",
+        provider: "openai",
+        model: "gpt-5",
+        prompt: "parent",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+      parentContext,
+    );
+    engine.onSubagentSpawned(
+      {
+        childSessionKey: "agent:child",
+        agentId: "child",
+        mode: "run",
+        threadRequested: false,
+        runId: "child-run",
+      },
+      { requesterSessionKey: "agent:main" },
+    );
+    engine.onLlmInput(
+      {
+        runId: "child-run",
+        sessionId: "child-session",
+        provider: "openai",
+        model: "gpt-5-mini",
+        prompt: "child",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+      { sessionId: "child-session", sessionKey: "agent:child" },
+    );
+
+    const parent = roots[0]!;
+    const subagent = parent.children.find((child) => child.name === "OpenClaw Subagent Run")!;
+    const childGeneration = subagent.children[0]!;
+    expect(subagent.spanAttributes["langfuse.session.id"]).toBe("parent-session");
+    expect(childGeneration.spanAttributes["langfuse.session.id"]).toBe("parent-session");
+
+    engine.flushAll();
   });
 
   it("marks unfinished observations as errors during shutdown", () => {
