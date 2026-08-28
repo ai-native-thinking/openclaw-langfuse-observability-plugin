@@ -71,10 +71,11 @@ type SubagentParent = {
   label?: string;
 };
 
-const TRACE_NAME = "langfuse.trace.name";
-const TRACE_USER_ID = "user.id";
-const TRACE_SESSION_ID = "session.id";
+const TRACE_NAME_KEY = "langfuse.trace.name";
+const TRACE_USER_ID_KEY = "langfuse.user.id";
+const TRACE_SESSION_ID_KEY = "langfuse.session.id";
 const TRACE_TAGS = "langfuse.trace.tags";
+const TRACE_NAME_VALUE = "OpenClaw Agent Run";
 
 function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
@@ -433,14 +434,18 @@ export class TraceEngine {
   // session would show a session id while later ones did not.
   private traceLevelAttributes(event: LlmInputEvent, ctx: AgentContext): Record<string, unknown> {
     return compact({
-      [TRACE_SESSION_ID]: event.sessionId || ctx.sessionKey || event.runId,
-      [TRACE_USER_ID]: this.config.userId,
+      [TRACE_SESSION_ID_KEY]: event.sessionId || ctx.sessionKey || event.runId,
+      [TRACE_USER_ID_KEY]: this.config.userId,
+      [TRACE_NAME_KEY]: TRACE_NAME_VALUE,
       [TRACE_TAGS]: this.config.tags?.length ? this.config.tags : undefined,
     });
   }
 
   private traceLevelAttributesById(sessionId: string): Record<string, unknown> {
-    return compact({ [TRACE_SESSION_ID]: sessionId });
+    return compact({
+      [TRACE_SESSION_ID_KEY]: sessionId,
+      [TRACE_NAME_KEY]: TRACE_NAME_VALUE,
+    });
   }
 
   private setTraceAttributes(
@@ -450,7 +455,7 @@ export class TraceEngine {
   ): void {
     const span = root.otelSpan;
     if (!span) return;
-    span.setAttribute(TRACE_NAME, "OpenClaw Agent Run");
+    span.setAttribute(TRACE_NAME_KEY, TRACE_NAME_VALUE);
     const attrs = this.traceLevelAttributes(event, ctx);
     for (const [key, value] of Object.entries(attrs)) span.setAttribute(key, value);
   }
