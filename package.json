@@ -8,6 +8,7 @@
     "dist",
     "openclaw.plugin.json",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "openclaw": {
