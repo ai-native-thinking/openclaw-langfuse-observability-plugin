@@ -75,7 +75,6 @@ const TRACE_NAME = "langfuse.trace.name";
 const TRACE_USER_ID = "user.id";
 const TRACE_SESSION_ID = "session.id";
 const TRACE_TAGS = "langfuse.trace.tags";
-const TRACE_METADATA = "langfuse.trace.metadata";
 
 function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
@@ -146,6 +145,7 @@ export class TraceEngine {
       : undefined;
     const rootAttributes = compact({
       input,
+      ...this.traceLevelAttributes(event, ctx),
       metadata: compact({
         "openclaw.run_id": event.runId,
         "openclaw.session_id": event.sessionId,
@@ -170,6 +170,7 @@ export class TraceEngine {
       event.model || "LLM",
       compact({
         input,
+        ...this.traceLevelAttributes(event, ctx),
         model: event.model,
         metadata: {
           "openclaw.provider": event.provider,
@@ -233,6 +234,7 @@ export class TraceEngine {
     const observation = parent.startObservation(
       event.toolName || "tool",
       compact({
+        ...this.traceLevelAttributesById(run.sessionId),
         input: this.config.captureInput
           ? sanitizeValue(event.params, this.config)
           : undefined,
@@ -270,6 +272,7 @@ export class TraceEngine {
         observation: parent.startObservation(
           event.toolName || "tool",
           compact({
+            ...this.traceLevelAttributesById(run.sessionId),
             input: this.config.captureInput
               ? sanitizeValue(event.params, this.config)
               : undefined,
@@ -420,6 +423,26 @@ export class TraceEngine {
     this.debug(`finished run ${run.runId}`);
   }
 
+  // Trace-level attributes (session, user, tags) that Langfuse reads to group
+  // and label a trace. These MUST be present on every span we emit, not just the
+  // root: the OpenClaw Agent Run root span is the LAST span we end, so the
+  // BatchSpanProcessor often exports a child (generation/tool) span first. If a
+  // child bootstraps the Langfuse trace, the trace-level session is taken from
+  // that child and the session.id only arriving later on the root is not
+  // applied retroactively — which is exactly why only the first trace of a
+  // session would show a session id while later ones did not.
+  private traceLevelAttributes(event: LlmInputEvent, ctx: AgentContext): Record<string, unknown> {
+    return compact({
+      [TRACE_SESSION_ID]: event.sessionId || ctx.sessionKey || event.runId,
+      [TRACE_USER_ID]: this.config.userId,
+      [TRACE_TAGS]: this.config.tags?.length ? this.config.tags : undefined,
+    });
+  }
+
+  private traceLevelAttributesById(sessionId: string): Record<string, unknown> {
+    return compact({ [TRACE_SESSION_ID]: sessionId });
+  }
+
   private setTraceAttributes(
     root: Observation,
     event: LlmInputEvent,
@@ -428,12 +451,8 @@ export class TraceEngine {
     const span = root.otelSpan;
     if (!span) return;
     span.setAttribute(TRACE_NAME, "OpenClaw Agent Run");
-    span.setAttribute(TRACE_SESSION_ID, event.sessionId || ctx.sessionKey || event.runId);
-    if (this.config.userId) span.setAttribute(TRACE_USER_ID, this.config.userId);
-    if (this.config.tags?.length) span.setAttribute(TRACE_TAGS, this.config.tags);
-    if (this.config.metadata) {
-      span.setAttribute(TRACE_METADATA, JSON.stringify(this.config.metadata));
-    }
+    const attrs = this.traceLevelAttributes(event, ctx);
+    for (const [key, value] of Object.entries(attrs)) span.setAttribute(key, value);
   }
 
   private debug(message: string): void {
