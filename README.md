@@ -20,7 +20,7 @@ When a subagent starts while its parent is still active, it is nested under the 
 
 ## Requirements
 
-- OpenClaw 2026.7.1 or newer
+- OpenClaw 2026.6.6 or newer
 - Node.js 22.22.3 or newer
 - pnpm 11 or newer
 - A Langfuse project, API keys, and the correct project host
@@ -173,6 +173,12 @@ Disable other Langfuse/OpenTelemetry exporters that observe the same OpenClaw ho
 ### A disabled-plugin configuration warning appears
 
 OpenClaw may warn that `langfuse-bridge` is disabled while its old configuration is still present. This warning does not affect this plugin. Remove the obsolete `plugins.entries.langfuse-bridge` entry if it is no longer needed.
+
+### A plugin API version mismatch appears
+
+This plugin declares OpenClaw Plugin API `>=2026.6.6`. Upgrade OpenClaw if the runtime exposes an older API.
+
+The additional `package.json missing openclaw.hooks` message is a fallback error from the installer after native plugin validation fails. This package is a native plugin declared through `openclaw.extensions`, not a Hook Pack; do not add `openclaw.hooks` to work around the message.
 
 ### Changes to linked source are not active
 

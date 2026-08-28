@@ -20,7 +20,7 @@
 
 ## 环境要求
 
-- OpenClaw 2026.7.1 或更高版本
+- OpenClaw 2026.6.6 或更高版本
 - Node.js 22.22.3 或更高版本
 - pnpm 11 或更高版本
 - Langfuse 项目、API Key，以及与项目区域匹配的访问地址
@@ -173,6 +173,12 @@ openclaw gateway restart
 ### 出现 disabled plugin 配置警告
 
 如果 `langfuse-bridge` 已禁用，但旧配置仍保留在 `openclaw.json` 中，OpenClaw 会显示警告。该警告不影响本插件；确认不再需要旧插件后，可以删除 `plugins.entries.langfuse-bridge` 配置项。
+
+### 出现 Plugin API 版本不兼容
+
+本插件声明的最低 OpenClaw Plugin API 版本为 `2026.6.6`。如果运行时暴露的 API 版本更低，需要升级 OpenClaw。
+
+随后出现的 `package.json missing openclaw.hooks` 是原生插件校验失败后，安装器尝试按 Hook Pack 解析时产生的回退错误。本项目通过 `openclaw.extensions` 声明为原生插件，并不是 Hook Pack；不要为了消除该提示而添加 `openclaw.hooks`。
 
 ### 修改链接目录中的代码后没有生效
 
